@@ -1,0 +1,53 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir /app
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      COGNE_API_KEY: ${COGNE_API_KEY:?Configure COGNE_API_KEY no .env}
+      VECTOR_DATABASE_URL: postgresql+asyncpg://${VECTOR_DB_USER:-app}:${VECTOR_DB_PASSWORD}@banco-vetorial:5432/${VECTOR_DB_NAME:-conhecimento}
+    volumes:
+      - ./backend:/app
+    ports:
+      - '8001:8000'
+    depends_on:
+      banco-vetorial:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports:
+      - '5173:5173'
+    depends_on:
+      - backend
+
+  banco-vetorial:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${VECTOR_DB_NAME:-conhecimento}
+      POSTGRES_USER: ${VECTOR_DB_USER:-app}
+      POSTGRES_PASSWORD: ${VECTOR_DB_PASSWORD:?Configure VECTOR_DB_PASSWORD no .env}
+    ports:
+      - '127.0.0.1:5433:5432'
+    volumes:
+      - dados_vetoriais:/var/lib/postgresql/data
+      - ./infra/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  dados_vetoriais:
