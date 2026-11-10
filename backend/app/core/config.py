@@ -50,3 +50,10 @@ def obter_provedor_embeddings() -> JinaEmbeddings:
         jina_api_key=configuracoes.cogne_api_key,
         model_name="jina-embeddings-v3",  # Nome correto do modelo
     )
+
+
+origens_cors = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:8001",
+]

@@ -5,7 +5,7 @@ from app.core.config import obter_provedor_embeddings
 
 async def buscar_contexto_com_score(
     query: str, 
-    limite_distancia: float = 0.25
+    limite_distancia: float = 0.28
 ) -> tuple[str, float, bool]:
     """
     Retorna (contexto, score_distancia, encontrou_memoria).
