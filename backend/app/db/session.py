@@ -1,17 +1,26 @@
-
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-
 from app.core.config import configuracoes
-
 
 motor = create_async_engine(
     configuracoes.vector_database_url,
     pool_pre_ping=True,
+)
+
+# Banco de negócio (ERP remoto)
+motor_negocio = create_async_engine(
+    configuracoes.url_banco_negocio,
+    pool_pre_ping=True,
+)
+
+SessaoBancoNegocio = async_sessionmaker(
+    bind=motor_negocio,
+    class_=AsyncSession,
+    expire_on_commit=False,
 )
 
 SessaoBanco = async_sessionmaker(

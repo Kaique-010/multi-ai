@@ -3,7 +3,13 @@ import time
 import uuid
 from typing import Literal
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, START, StateGraph
 
@@ -12,26 +18,42 @@ from app.core.config import configuracoes
 from app.core.observability import log_evento
 from app.services.memorizer import memorizar_resposta
 from app.services.retriever import buscar_contexto_com_score
+from app.services.sql_service import (
+    consultar_banco_negocio,
+    listar_tabelas_negocio,
+)
 from app.tools.search import realizar_buscas
 
 logger = logging.getLogger("multiagentes.graph")
 
-modelo = ChatOpenAI(
+# 1. Registro das ferramentas disponíveis para o modelo
+ferramentas_disponiveis = [
+    consultar_banco_negocio,
+    listar_tabelas_negocio,
+]
+
+# 2. Inicialização do modelo e acoplamento das ferramentas via bind_tools
+modelo_base = ChatOpenAI(
     model=configuracoes.deepseek_model,
     api_key=configuracoes.deepseek_api_key,
     base_url=configuracoes.deepseek_base_url.rstrip("/") + "/",
     temperature=0.2,
 )
 
+modelo_com_ferramentas = modelo_base.bind_tools(ferramentas_disponiveis)
 
-# 1. Nó Inicial: Consulta a Memória Vetorial
+
+# --- NÓS DO GRAFO ---
+
 async def recuperar_contexto(estado: EstadoAgente) -> dict:
+    """Consulta a memória vetorial (Jina v3 + PGVector) para checar similaridade."""
     inicio = time.perf_counter()
     log_evento(logger, logging.INFO, "node.started", node="recuperar_contexto")
 
     try:
         contexto, score, encontrou_memoria = await buscar_contexto_com_score(
-            estado["mensagem"]
+            estado["mensagem"],
+            limite_distancia=0.28  # Threshold otimizado para evitar falsos positivos
         )
 
         log_evento(
@@ -57,33 +79,33 @@ async def recuperar_contexto(estado: EstadoAgente) -> dict:
         raise
 
 
-# 2. Decisor de Rota (Edge Condicional)
 def decidir_proximo_passo(
     estado: EstadoAgente,
 ) -> Literal["responder_com_memoria", "buscar_e_aprender"]:
+    """Desvia o fluxo baseando-se no Hit/Miss da memória vetorial."""
     if estado.get("encontrou_memoria"):
         return "responder_com_memoria"
     return "buscar_e_aprender"
 
 
-# 3A. Nó de Resposta Direta da Memória (Hit de Cache)
 async def responder_com_memoria(estado: EstadoAgente) -> dict:
+    """Responde diretamente a partir do conhecimento memorizado (Cache Hit)."""
     inicio = time.perf_counter()
     log_evento(logger, logging.INFO, "node.started", node="responder_com_memoria")
 
     try:
         prompt_sistema = (
-            "Você é um assistente de IA especialista.\n"
+            "Você é um assistente de IA especialista em consultas ao banco de dados de negócio.\n"
+            "Esta é uma conversa contínua: use o histórico acima para entender o contexto.\n"
             "Responda à pergunta do usuário em português brasileiro baseando-se no "
             f"conhecimento memorizado a seguir:\n\nContexto:\n{estado['contexto']}"
         )
 
-        mensagens = [
-            SystemMessage(content=prompt_sistema),
-            HumanMessage(content=estado["mensagem"]),
-        ]
+        mensagens: list[BaseMessage] = [SystemMessage(content=prompt_sistema)]
+        mensagens.extend(estado.get("historico", []))
+        mensagens.append(HumanMessage(content=estado["mensagem"]))
 
-        resultado = await modelo.ainvoke(mensagens)
+        resultado = await modelo_base.ainvoke(mensagens)
         resposta = str(resultado.content)
 
         log_evento(
@@ -104,32 +126,103 @@ async def responder_com_memoria(estado: EstadoAgente) -> dict:
         raise
 
 
-# 3B. Nó de Busca Externa + Síntese + Aprendizado Automático (Miss de Cache)
+async def _executar_tool_calls(
+    mensagens: list[BaseMessage],
+    ai_msg: AIMessage,
+) -> list[BaseMessage]:
+    """Executa tool_calls do modelo e anexa ToolMessage na sequência."""
+    ferramentas_por_nome = {
+        consultar_banco_negocio.name: consultar_banco_negocio,
+        listar_tabelas_negocio.name: listar_tabelas_negocio,
+    }
+
+    for tool_call in ai_msg.tool_calls:
+        nome = tool_call["name"]
+        ferramenta = ferramentas_por_nome.get(nome)
+
+        if ferramenta is None:
+            mensagens.append(
+                ToolMessage(
+                    content=f"Ferramenta '{nome}' não disponível.",
+                    tool_call_id=tool_call["id"],
+                )
+            )
+            continue
+
+        try:
+            saida = await ferramenta.ainvoke(tool_call["args"])
+        except Exception as erro:
+            saida = f"Erro ao executar {nome}: {erro}"
+
+        mensagens.append(
+            ToolMessage(content=str(saida), tool_call_id=tool_call["id"])
+        )
+
+    return mensagens
+
+
 async def buscar_e_aprender(estado: EstadoAgente) -> dict:
+    """Executa buscas (Web + SQL Negócio via Tool Calling), responde e memoriza."""
     inicio = time.perf_counter()
     log_evento(logger, logging.INFO, "node.started", node="buscar_e_aprender")
 
     try:
-        # 1. Executa a Tool de busca web
-        resultado_busca = await realizar_buscas(estado["mensagem"])
+        historico = estado.get("historico", [])
+        eh_follow_up = len(historico) > 0
 
-        # 2. Gera a resposta via DeepSeek com os dados frescos
+        # 1. Busca web SÓ na primeira mensagem (follow-ups são sobre o mesmo tema)
+        resultado_busca_web = ""
+        if not eh_follow_up and len(estado["mensagem"].split()) >= 4:
+            resultado_busca_web = await realizar_buscas(estado["mensagem"])
+
+        # 2. Lista de tabelas só no primeiro turno; depois o modelo já conhece
+        tabelas = ""
+        if not eh_follow_up:
+            tabelas = await listar_tabelas_negocio.ainvoke({})
+
         prompt_sistema = (
-            "Você é um assistente de IA especialista.\n"
-            "Responda à pergunta do usuário em português brasileiro com base nos "
-            f"resultados atualizados obtidos da busca a seguir:\n\nResultados:\n{resultado_busca}"
+            "Você é um assistente de IA especialista em consultas ao banco de dados de negócio.\n"
+            "Esta é uma conversa contínua: use o histórico acima para entender o contexto "
+            "e NÃO repita explicações já dadas.\n\n"
         )
 
-        mensagens = [
-            SystemMessage(content=prompt_sistema),
-            HumanMessage(content=estado["mensagem"]),
-        ]
+        if tabelas:
+            prompt_sistema += (
+                f"Tabelas disponíveis no banco de negócio:\n{tabelas}\n\n"
+            )
 
-        resultado_llm = await modelo.ainvoke(mensagens)
-        resposta = str(resultado_llm.content)
+        if resultado_busca_web:
+            prompt_sistema += (
+                f"Resultados da busca web (use apenas se relevante):\n{resultado_busca_web}\n\n"
+            )
 
-        # 3. APRENDE: Grava o par pergunta + resposta no PGVector usando Jina AI v3
-        await memorizar_resposta(estado["mensagem"], resposta)
+        prompt_sistema += (
+            "Instruções:\n"
+            "- Se precisar de dados do banco, CHAME a ferramenta `consultar_banco_negocio` "
+            "com um SELECT (não descreva, execute).\n"
+            "- Em follow-ups, continue de onde parou sem re-listar estrutura.\n"
+            "- Responda em português brasileiro de forma objetiva."
+        )
+
+        mensagens: list[BaseMessage] = [SystemMessage(content=prompt_sistema)]
+        mensagens.extend(historico)
+        mensagens.append(HumanMessage(content=estado["mensagem"]))
+
+        # 3. Loop de tool calling: executa até o modelo parar de chamar ferramentas
+        max_iteracoes = 5
+        for _ in range(max_iteracoes):
+            resultado_llm = await modelo_com_ferramentas.ainvoke(mensagens)
+            mensagens.append(resultado_llm)
+
+            if not resultado_llm.tool_calls:
+                break
+
+            mensagens = await _executar_tool_calls(mensagens, resultado_llm)
+
+        resposta_final = str(resultado_llm.content)
+
+        # 4. APRENDE: Salva o novo conhecimento no PGVector via Jina v3
+        await memorizar_resposta(estado["mensagem"], resposta_final)
 
         log_evento(
             logger,
@@ -139,7 +232,7 @@ async def buscar_e_aprender(estado: EstadoAgente) -> dict:
             duration_ms=round((time.perf_counter() - inicio) * 1000, 2),
         )
 
-        return {"resposta": resposta}
+        return {"resposta": resposta_final}
 
     except Exception:
         logger.exception(
@@ -149,18 +242,15 @@ async def buscar_e_aprender(estado: EstadoAgente) -> dict:
         raise
 
 
-# --- Montagem do Grafo ---
+# --- MONTAGEM DO GRAFO ---
 construtor = StateGraph(EstadoAgente)
 
-# Nós
 construtor.add_node("recuperar_contexto", recuperar_contexto)
 construtor.add_node("responder_com_memoria", responder_com_memoria)
 construtor.add_node("buscar_e_aprender", buscar_e_aprender)
 
-# Fluxo de execução
 construtor.add_edge(START, "recuperar_contexto")
 
-# Roteamento Condicional
 construtor.add_conditional_edges(
     "recuperar_contexto",
     decidir_proximo_passo,
@@ -176,8 +266,11 @@ construtor.add_edge("buscar_e_aprender", END)
 grafo = construtor.compile()
 
 
-# --- Invocação Externa pelo FastAPI ---
-async def executar_grafo(mensagem: str) -> str:
+# --- EXECUÇÃO PELO FASTAPI ---
+async def executar_grafo(
+    mensagem: str,
+    historico: list[BaseMessage] | None = None,
+) -> str:
     graph_run_id = str(uuid.uuid4())
     inicio = time.perf_counter()
 
@@ -200,10 +293,12 @@ async def executar_grafo(mensagem: str) -> str:
         resultado = await grafo.ainvoke(
             {
                 "mensagem": mensagem,
+                "historico": historico or [],
                 "contexto": "",
                 "score": 0.0,
                 "encontrou_memoria": False,
                 "resposta": "",
+                "mensagens": [],
             },
             config={
                 "metadata": {

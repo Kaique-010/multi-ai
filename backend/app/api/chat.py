@@ -1,4 +1,5 @@
 from fastapi import APIRouter, HTTPException
+from langchain_core.messages import AIMessage, HumanMessage
 
 from app.api.schemas import MensagemChat, RespostaChat
 from app.agents.graph import executar_grafo
@@ -11,7 +12,14 @@ router = APIRouter(prefix="/api/chat", tags=["Chat"])
 @router.post("/", response_model=RespostaChat) # <- Garante ambos os caminhos
 async def conversar(dados: MensagemChat) -> RespostaChat:
     try:
-        resposta = await executar_grafo(dados.mensagem) 
+        historico = [
+            HumanMessage(content=m.content)
+            if m.role == "user"
+            else AIMessage(content=m.content)
+            for m in dados.historico
+        ]
+
+        resposta = await executar_grafo(dados.mensagem, historico=historico)
         return RespostaChat(resposta=resposta)
 
     except ValueError as erro:

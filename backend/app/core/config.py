@@ -1,6 +1,7 @@
 from functools import lru_cache
 import logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy.engine.url import make_url
 from langchain_community.embeddings import JinaEmbeddings
 
 logger = logging.getLogger(__name__)
@@ -14,12 +15,13 @@ class Configuracoes(BaseSettings):
     vector_db_name: str = "conhecimento"
     vector_db_user: str = "app"
     vector_db_password: str = ""
-
     vector_database_url: str = (
         "postgresql+asyncpg://app:app@banco-vetorial:5432/conhecimento"
     )
 
+    # URL do banco de negócio (ERP remoto). Fonte única: MCP_POSTGRES_URL.
     mcp_postgres_url: str = ""
+
     cors_origins: str = "http://localhost:5173"
     cogne_api_key: str = ""
 
@@ -36,6 +38,26 @@ class Configuracoes(BaseSettings):
             if origem.strip()
         ]
 
+    @property
+    def url_banco_negocio(self) -> str:
+        """Normaliza MCP_POSTGRES_URL para o driver asyncpg do SQLAlchemy."""
+        url = self.mcp_postgres_url.strip()
+
+        if not url:
+            raise ValueError("MCP_POSTGRES_URL não configurada.")
+
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+
+        parsed = make_url(url)
+
+        if parsed.drivername not in ("postgresql", "postgresql+asyncpg"):
+            raise ValueError("A URL deve apontar para PostgreSQL.")
+
+        return parsed.set(drivername="postgresql+asyncpg").render_as_string(
+            hide_password=False
+        )
+
 
 @lru_cache
 def obter_configuracoes() -> Configuracoes:
@@ -48,12 +70,5 @@ configuracoes = obter_configuracoes()
 def obter_provedor_embeddings() -> JinaEmbeddings:
     return JinaEmbeddings(
         jina_api_key=configuracoes.cogne_api_key,
-        model_name="jina-embeddings-v3",  # Nome correto do modelo
+        model_name="jina-embeddings-v3",
     )
-
-
-origens_cors = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:8001",
-]

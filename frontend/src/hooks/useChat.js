@@ -33,8 +33,17 @@ export function useChat() {
     setMensagens((prev) => [...prev, mensagemUsuario])
     setCarregando(true)
 
+    // Monta o histórico para o backend (últimas 10 mensagens, sem a de boas-vindas)
+    const historico = mensagens
+      .filter((m) => m.id !== 1)
+      .slice(-10)
+      .map((m) => ({
+        role: m.remetente === 'usuario' ? 'user' : 'assistant',
+        content: m.texto,
+      }))
+
     try {
-      const data = await enviarMensagemApi(textoInput)
+      const data = await enviarMensagemApi(textoInput, historico)
 
       const mensagemAgente = {
         id: Date.now() + 1,
