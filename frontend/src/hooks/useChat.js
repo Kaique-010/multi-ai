@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from 'react'
-import { enviarMensagemApi } from '../services/chat'
+import { useState, useRef, useEffect, useCallback } from 'react'
+import { enviarMensagemApi, buscarHistoricoApi } from '../services/chat'
 
 export function useChat() {
   const [mensagens, setMensagens] = useState([
@@ -10,15 +10,29 @@ export function useChat() {
         'Olá! Sou o assistente multiagentes com auto-aprendizado. Como posso ajudar?',
     },
   ])
+  const [historico, setHistorico] = useState([])
   const [carregando, setCarregando] = useState(false)
+  const [carregandoHistorico, setCarregandoHistorico] = useState(false)
   const chatEndRef = useRef(null)
 
-  const rolarParaFim = () => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }
+  const carregarHistorico = useCallback(async () => {
+    setCarregandoHistorico(true)
+    try {
+      const data = await buscarHistoricoApi()
+      setHistorico(data.historico)
+    } catch (error) {
+      console.error('Erro ao buscar histórico:', error)
+    } finally {
+      setCarregandoHistorico(false)
+    }
+  }, [])
 
   useEffect(() => {
-    rolarParaFim()
+    carregarHistorico()
+  }, [carregarHistorico])
+
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [mensagens, carregando])
 
   const enviarMensagem = async (textoInput) => {
@@ -52,6 +66,7 @@ export function useChat() {
       }
 
       setMensagens((prev) => [...prev, mensagemAgente])
+      await carregarHistorico()
     } catch (error) {
       setMensagens((prev) => [
         ...prev,
@@ -70,6 +85,8 @@ export function useChat() {
   return {
     mensagens,
     carregando,
+    carregandoHistorico,
+    historico,
     chatEndRef,
     enviarMensagem,
   }

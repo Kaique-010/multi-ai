@@ -29,3 +29,13 @@ export async function enviarMensagemApi(
 
   return await response.json()
 }
+
+export async function buscarHistoricoApi() {
+  const response = await fetch(`${API_URL}/api/chat/historico`)
+
+  if (!response.ok) {
+    throw new Error(`Erro na API (${response.status}): ${response.statusText}`)
+  }
+
+  return await response.json()
+}

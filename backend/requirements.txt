@@ -14,3 +14,5 @@ ddgs
 plotly
 scikit-learn
 pandas
+langchain-mcp-adapters>=0.1.0
+mcp>=1.0.0

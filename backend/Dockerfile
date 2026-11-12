@@ -1,4 +1,3 @@
-
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -6,6 +5,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
+
+# Instala Node.js (necessário para rodar npx no MultiServerMCPClient) e dependências de build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt-get/lists/*
 
 COPY requirements.txt .
 

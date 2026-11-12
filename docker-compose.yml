@@ -5,11 +5,15 @@ services:
       dockerfile: Dockerfile
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload --app-dir /app
     restart: unless-stopped
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
     env_file:
       - .env
     environment:
       COGNE_API_KEY: ${COGNE_API_KEY:?Configure COGNE_API_KEY no .env}
       VECTOR_DATABASE_URL: postgresql+asyncpg://${VECTOR_DB_USER:-app}:${VECTOR_DB_PASSWORD}@banco-vetorial:5432/${VECTOR_DB_NAME:-conhecimento}
+      MCP_POSTGRES_URL: ${MCP_POSTGRES_URL:?Configure MCP_POSTGRES_URL no .env}
     volumes:
       - ./backend:/app
     ports:
@@ -48,6 +52,18 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  mcp-postgres:
+    image: node:20-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_URL: postgresql://${VECTOR_DB_USER:-app}:${VECTOR_DB_PASSWORD}@banco-vetorial:5432/${VECTOR_DB_NAME:-conhecimento}
+    command: >
+      npx -y @modelcontextprotocol/server-postgres
+      postgresql://${VECTOR_DB_USER:-app}:${VECTOR_DB_PASSWORD}@banco-vetorial:5432/${VECTOR_DB_NAME:-conhecimento}
+    depends_on:
+      banco-vetorial:
+        condition: service_healthy
 
 volumes:
   dados_vetoriais:
